@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Master Audio Studio - PRO</title>
+    <style>
+        :root { --bg: #050505; --card: #111; --accent: #00f2ff; --drum: #ff0055; --text: #eee; --bass: #8a2be2; }
+        body { font-family: 'Courier New', monospace; background: var(--bg); color: var(--text); display: flex; flex-direction: column; align-items: center; padding: 20px; user-select: none; }
+        .studio { background: var(--card); padding: 25px; border-radius: 10px; border: 2px solid #333; box-shadow: 0 0 50px rgba(0,242,255,0.1); }
+        .row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+        .label { width: 100px; font-size: 0.7rem; color: #888; font-weight: bold; }
+        .grid { display: flex; gap: 4px; }
+        .cell { width: 30px; height: 30px; background: #222; border-radius: 3px; cursor: pointer; border: 1px solid #333; transition: all 0.1s; }
+        .cell.active { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+        .cell.bass-active { background: var(--bass); box-shadow: 0 0 8px var(--bass); }
+        .cell.drum-active { background: var(--drum); box-shadow: 0 0 8px var(--drum); }
+        .cell.playing { filter: brightness(2); transform: scale(1.1); border-color: #fff; }
+        .controls { margin-top: 25px; display: grid; grid-template-columns: 1fr 1fr; gap: 15px; background: #1a1a1a; padding: 20px; border-radius: 8px; }
+        button { padding: 10px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; text-transform: uppercase; transition: 0.2s; }
+        .btn-play { background: #00ff88; grid-column: span 2; font-size: 1.2rem; }
+        .btn-play.stop { background: #ff4444; }
+        .btn-export { background: #ff9500; color: black; grid-column: span 2; margin-top: 5px; }
+        .btn-clear { background: #666; color: white; grid-column: span 2; }
+        select, input { background: #333; color: white; border: 1px solid #444; padding: 5px; border-radius: 4px; }
+        canvas { border: 1px solid #444; background: #000; display: block; margin-top: 20px; border-radius: 4px; }
+    </style>
+</head>
+<body oncontextmenu="return false;">
+
+    <div class="studio">
+        <h2 style="letter-spacing: 5px; text-align: center; margin-bottom: 20px;">WEB DAW v4.5</h2>
+        
+        <div id="matrix"></div>
+
+        <canvas id="visualizer" width="700" height="100"></canvas>
+
+        <div class="controls">
+            <button id="playBtn" class="btn-play">PLAY / STOP</button>
+            
+            <div>
+                <label>Sintetizador:</label>
+                <select id="instType">
+                    <option value="sine">Piano Soft</option>
+                    <option value="square">Retro 8-Bit</option>
+                    <option value="sawtooth">Synth Lead</option>
+                    <option value="triangle">Órgano</option>
+                    <option value="fat-saw">Super Saw</option>
+                    <option value="pluck">Electric Pluck</option>
+                </select>
+            </div>
+
+            <div>
+                <label>BPM:</label>
+                <input type="number" id="bpm" value="120" min="40" max="220" style="width: 60px;">
+            </div>
+
+            <button onclick="saveProject()" style="background:#444; color:white;">Guardar JSON</button>
+            <button onclick="loadProject()" style="background:#444; color:white;">Cargar JSON</button>
+            
+            <button onclick="clearGrid()" class="btn-clear">Limpiar Secuencia</button>
+            <button id="exportBtn" class="btn-export">Exportar .WAV (Grabar Ciclo)</button>
+        </div>
+    </div>
+
+    <script>
+        // --- BLOQUEO DE SEGURIDAD ---
+        document.addEventListener('contextmenu', event => event.preventDefault()); // Bloquea click derecho
+        document.onkeydown = function(e) {
+            if (e.keyCode == 123) return false; // Bloquea F12
+            if (e.ctrlKey && e.shiftKey && (e.keyCode == 'I'.charCodeAt(0) || e.keyCode == 'J'.charCodeAt(0) || e.keyCode == 'C'.charCodeAt(0))) return false; // Bloquea Ctrl+Shift+I/J/C
+            if (e.ctrlKey && e.keyCode == 'U'.charCodeAt(0)) return false; // Bloquea Ctrl+U (Ver código)
+        };
+
+        // --- LÓGICA DEL DAW ---
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const matrix = document.getElementById('matrix');
+        const visualizerCanvas = document.getElementById('visualizer');
+        const visualizerCtx = visualizerCanvas.getContext('2d');
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        const bufferLength = analyser.frequencyBinCount;
+        const dataArray = new Uint8Array(bufferLength);
+
+        const dest = audioCtx.createMediaStreamDestination();
+        analyser.connect(audioCtx.destination);
+        analyser.connect(dest);
+
+        const tracks = [
+            { name: 'HI-NOTE', freq: 523.25, type: 'synth' },
+            { name: 'MID-NOTE', freq: 392.00, type: 'synth' },
+            { name: 'LOW-NOTE', freq: 329.63, type: 'synth' },
+            { name: 'BASE-NOTE', freq: 261.63, type: 'synth' },
+            { name: 'DEEP-BASS', freq: 130.81, type: 'bass' },
+            { name: 'KICK', type: 'drum' },
+            { name: 'SNARE', type: 'drum' },
+            { name: 'HI-HAT', type: 'drum' }
+        ];
+
+        let isPlaying = false;
+        let currentStep = 0;
+        let timer = null;
+
+        function drawVisualizer() {
+            requestAnimationFrame(drawVisualizer);
+            analyser.getByteTimeDomainData(dataArray);
+            visualizerCtx.clearRect(0, 0, visualizerCanvas.width, visualizerCanvas.height);
+            visualizerCtx.lineWidth = 2;
+            visualizerCtx.strokeStyle = '#00f2ff';
+            visualizerCtx.beginPath();
+            const sliceWidth = visualizerCanvas.width / bufferLength;
+            let x = 0;
+            for (let i = 0; i < bufferLength; i++) {
+                const v = dataArray[i] / 128.0;
+                const y = v * visualizerCanvas.height / 2;
+                if (i === 0) visualizerCtx.moveTo(x, y);
+                else visualizerCtx.lineTo(x, y);
+                x += sliceWidth;
+            }
+            visualizerCtx.lineTo(visualizerCanvas.width, visualizerCanvas.height / 2);
+            visualizerCtx.stroke();
+        }
+        drawVisualizer();
+
+        tracks.forEach((t, i) => {
+            const row = document.createElement('div');
+            row.className = 'row';
+            row.innerHTML = `<div class="label">${t.name}</div>`;
+            const grid = document.createElement('div');
+            grid.className = 'grid';
+            for(let s=0; s<16; s++) {
+                const c = document.createElement('div');
+                c.className = 'cell';
+                c.dataset.t = i;
+                c.onclick = () => {
+                    if (t.type === 'synth') c.classList.toggle('active');
+                    else if (t.type === 'bass') c.classList.toggle('bass-active');
+                    else c.classList.toggle('drum-active');
+                };
+                grid.appendChild(c);
+            }
+            row.appendChild(grid);
+            matrix.appendChild(row);
+        });
+
+        function clearGrid() {
+            if(confirm("¿Estás seguro de que quieres borrar toda la pista?")) {
+                document.querySelectorAll('.cell').forEach(c => {
+                    c.classList.remove('active', 'bass-active', 'drum-active', 'playing');
+                });
+                currentStep = 0;
+            }
+        }
+
+        function playSound(freq, type) {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            if (type === 'fat-saw') {
+                osc.type = 'sawtooth';
+                osc.detune.setValueAtTime(12, audioCtx.currentTime);
+            } else if (type === 'pluck') {
+                osc.type = 'square';
+            } else {
+                osc.type = type;
+            }
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            gain.gain.setValueAtTime(0, audioCtx.currentTime);
+            const attack = (type === 'pluck') ? 0.005 : 0.05;
+            const release = (type === 'pluck') ? 0.15 : 0.5;
+            gain.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + attack);
+            gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + release);
+            osc.connect(gain); gain.connect(analyser);
+            osc.start(); osc.stop(audioCtx.currentTime + release);
+        }
+
+        function playKick() {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+            gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+            osc.connect(gain); gain.connect(analyser);
+            osc.start(); osc.stop(audioCtx.currentTime + 0.3);
+        }
+
+        function playSnare() {
+            const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.1, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+            const source = audioCtx.createBufferSource();
+            source.buffer = buffer;
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'highpass'; filter.frequency.value = 1500;
+            const gain = audioCtx.createGain();
+            gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+            source.connect(filter); filter.connect(gain); gain.connect(analyser);
+            source.start();
+        }
+
+        function playHiHat() {
+            const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.02, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+            const source = audioCtx.createBufferSource();
+            source.buffer = buffer;
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'highpass'; filter.frequency.value = 8000;
+            const gain = audioCtx.createGain();
+            gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.03);
+            source.connect(filter); filter.connect(gain); gain.connect(analyser);
+            source.start();
+        }
+
+        function step() {
+            const inst = document.getElementById('instType').value;
+            const cells = document.querySelectorAll(`.grid .cell:nth-child(${currentStep + 1})`);
+            document.querySelectorAll('.cell').forEach(c => c.classList.remove('playing'));
+            cells.forEach(c => {
+                c.classList.add('playing');
+                const tIndex = c.dataset.t;
+                if(c.classList.contains('active') || c.classList.contains('bass-active')) {
+                    playSound(tracks[tIndex].freq, inst);
+                }
+                if(c.classList.contains('drum-active')) {
+                    const name = tracks[tIndex].name;
+                    if(name === 'KICK') playKick();
+                    else if(name === 'SNARE') playSnare();
+                    else if(name === 'HI-HAT') playHiHat();
+                }
+            });
+            currentStep = (currentStep + 1) % 16;
+        }
+
+        document.getElementById('playBtn').onclick = function() {
+            togglePlay();
+        };
+
+        function togglePlay(forceStop = false) {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            if (isPlaying || forceStop) {
+                clearInterval(timer);
+                isPlaying = false;
+                document.getElementById('playBtn').classList.remove('stop');
+            } else {
+                isPlaying = true;
+                document.getElementById('playBtn').classList.add('stop');
+                const bpm = document.getElementById('bpm').value;
+                const ms = (60000 / bpm) / 4;
+                timer = setInterval(step, ms);
+            }
+        }
+
+        document.getElementById('exportBtn').onclick = function() {
+            if (isPlaying) togglePlay(true);
+            currentStep = 0;
+            const bpm = document.getElementById('bpm').value;
+            const msPerStep = (60000 / bpm) / 4;
+            const totalDuration = msPerStep * 16;
+            const mediaRecorder = new MediaRecorder(dest.stream);
+            const chunks = [];
+            mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(chunks, { type: 'audio/wav' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'mi_pista_master.wav';
+                a.click();
+                togglePlay(true);
+            };
+            mediaRecorder.start();
+            togglePlay();
+            setTimeout(() => { mediaRecorder.stop(); }, totalDuration + 100);
+        };
+
+        function saveProject() {
+            const states = Array.from(document.querySelectorAll('.cell')).map(c => c.className);
+            const blob = new Blob([JSON.stringify(states)], {type: 'application/json'});
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'track_master.json';
+            a.click();
+        }
+
+        function loadProject() {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.onchange = e => {
+                const reader = new FileReader();
+                reader.onload = res => {
+                    const states = JSON.parse(res.target.result);
+                    document.querySelectorAll('.cell').forEach((c, i) => c.className = states[i]);
+                };
+                reader.readAsText(e.target.files[0]);
+            };
+            input.click();
+        }
+    </script>
+</body>
+</html>
